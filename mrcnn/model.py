@@ -2390,6 +2390,25 @@ class MaskRCNN():
         )
         self.epoch = max(self.epoch, epochs)
 
+    def evaluate(self, val_dataset):
+        """Evaluate the model. Return configured metrics.
+        val_dataset: validation Dataset object.
+        """
+        # require training mode for loss layers
+        assert self.mode == "training", "Create model in training mode."
+        
+        log("Checkpoint Path: {}".format(self.checkpoint_path))
+        self.compile(self.config.LEARNING_RATE, self.config.LEARNING_MOMENTUM)
+        val_generator = DataGenerator(val_dataset, self.config, shuffle=True,
+                                      batch_size=self.config.BATCH_SIZE)
+        return self.keras_model.evaluate_generator(
+            val_generator,
+            steps=self.config.VALIDATION_STEPS,
+            max_queue_size=100,
+            workers=2, # workers
+            use_multiprocessing=False, # True
+        )
+
     def mold_inputs(self, images):
         """Takes a list of images and modifies them to the format expected
         as an input to the neural network.
