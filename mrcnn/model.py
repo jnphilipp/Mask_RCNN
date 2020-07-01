@@ -963,19 +963,18 @@ def fpn_classifier_graph(rois, feature_maps, image_meta,
     # non_zeros: [batch, num_rois, num_classes]
     non_zeros = K.tile(K.expand_dims(non_zeros, -1), (1,1,num_classes))
 
-    mrcnn_class_logits = KL.Lambda(lambda x: \
-                       K.tf.where(non_zeros, x, \
-                       K.zeros_like(x)),
-                       name="mrcnn_class_logits_trimed")(mrcnn_class_logits)
-    mrcnn_probs = KL.Lambda(lambda x: \
-                       K.tf.where(non_zeros, x, K.zeros_like(x)),
-                       name="mrcnn_class_trimed")(mrcnn_probs)
+    mrcnn_class_logits = KL.Lambda(
+        lambda x: tf.where(non_zeros, x, K.zeros_like(x)),
+        name="mrcnn_class_logits_trimed")(mrcnn_class_logits)
+    mrcnn_probs = KL.Lambda(
+        lambda x: tf.where(non_zeros, x, K.zeros_like(x)),
+        name="mrcnn_class_trimed")(mrcnn_probs)
     
     # non_zeros: [batch, num_rois, num_classes, 4]
     non_zeros = K.tile(K.expand_dims(non_zeros, -1), (1,1,1,4))
-    mrcnn_bbox = KL.Lambda(lambda x: \
-                       K.tf.where(non_zeros, x, K.zeros_like(x)),
-                       name="mrcnn_bbox_trimed")(mrcnn_bbox)
+    mrcnn_bbox = KL.Lambda(
+        lambda x: tf.where(non_zeros, x, K.zeros_like(x)),
+        name="mrcnn_bbox_trimed")(mrcnn_bbox)
     
     return mrcnn_class_logits, mrcnn_probs, mrcnn_bbox
 
