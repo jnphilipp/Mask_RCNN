@@ -1704,7 +1704,7 @@ class DataGenerator(keras.utils.Sequence):
     
     def data_generator(self,image_ids):
         b=0
-        while b < self.batch_size:
+        while b < self.batch_size and b < image_ids.shape[0]:
             try: 
                 # Get GT bounding boxes and masks for image.
                 image_id = image_ids[b]
