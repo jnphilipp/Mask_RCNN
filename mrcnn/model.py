@@ -535,10 +535,16 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config)
 
     # Compute overlaps with crowd boxes [proposals, crowd_boxes]
     crowd_overlaps = overlaps_graph(proposals, crowd_boxes)
+    # Tensorflow#31325 says reduce_max is allowed to produce
+    # a non-empty result filled with FLOAT_MAX here (-inf)
+    # so all proposals will be no_crowd_bool if crowd_boxes is empty
     crowd_iou_max = tf.reduce_max(crowd_overlaps, axis=1)
     no_crowd_bool = (crowd_iou_max < 0.001)
 
     # Determine positive and negative ROIs
+    # Tensorflow#31325 says reduce_max is allowed to produce
+    # a non-empty result filled with FLOAT_MAX here (-inf)
+    # so all proposals will be negative if gt_boxes is empty
     roi_iou_max = tf.reduce_max(overlaps, axis=1)
     # 1. Positive ROIs are those with >= 0.5 IoU with a GT box
     positive_roi_bool = (roi_iou_max >= 0.5)
@@ -554,7 +560,14 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config)
     positive_count = tf.shape(positive_indices)[0]
     # Negative ROIs. Add enough to maintain positive:negative ratio.
     r = 1.0 / config.ROI_POSITIVE_RATIO
-    negative_count = tf.cast(r * tf.cast(positive_count, tf.float32), tf.int32) - positive_count
+    # But if there are too few or no positive ROIs (because of
+    # too few GT instances or too inaccurate RPN), then ensure
+    # that we have enough negative ROIs to avoid zero padding.
+    # (However, there could still be too few negative ROIs if
+    #  the RPN predicts too well.)
+    negative_count = tf.cond(tf.greater(positive_count, 0),
+                             true_fn=lambda: tf.cast(r * tf.cast(positive_count, tf.float32), tf.int32) - positive_count,
+                             false_fn=lambda: tf.constant(config.TRAIN_ROIS_PER_IMAGE))
     negative_indices = tf.random_shuffle(negative_indices)[:negative_count]
     # Gather selected ROIs
     positive_rois = tf.gather(proposals, positive_indices)
@@ -605,8 +618,14 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config)
     # binary cross entropy loss.
     masks = tf.round(masks)
 
-    # Append negative ROIs and pad bbox deltas and masks that
-    # are not used for negative ROIs with zeros.
+    # Append negative ROIs and pad their class IDs, bbox deltas and masks
+    # with zeros (because they are discounted above).
+    # Moreover, pad remaining ROIs up to config.TRAIN_ROIS_PER_IMAGE
+    # (=P) with zeros, because we need a constant output shape.
+    # So from now on we need to distinguish between zeros from padding
+    # (to be masked) and zeros from negative ROIs (to be learned), esp.
+    # in mrcnn_class_loss_graph and mrcnn_bbox_loss_graph, suppressing
+    # indexes with zero bbox size but not indexes with zero class IDs.
     rois = tf.concat([positive_rois, negative_rois], axis=0)
     N = tf.shape(negative_rois)[0]
     P = tf.maximum(config.TRAIN_ROIS_PER_IMAGE - tf.shape(rois)[0], 0)
@@ -1099,10 +1118,11 @@ def rpn_bbox_loss_graph(config, target_bbox, rpn_match, rpn_bbox):
     return loss
 
 
-def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
+def mrcnn_class_loss_graph(target_bbox, target_class_ids, pred_class_logits,
                            active_class_ids):
     """Loss for the classifier head of Mask RCNN.
 
+    target_bbox: [batch, num_rois, (y1, x1, y2, x2)]
     target_class_ids: [batch, num_rois]. Integer class IDs. Uses zero
         padding to fill in the array.
     pred_class_logits: [batch, num_rois, num_classes]. Uses zero
@@ -1112,8 +1132,9 @@ def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
         for classes that are not in the dataset.
     """
 
-    # Specify which rois in target_class_ids is zero padding or not
-    non_zeros = tf.cast(tf.greater(target_class_ids, 0), 'float32')
+    # Specify which rois are zero padding: look for zeros in bboxes
+    # (zeros in target_class_ids could still just be background class)
+    non_zeros = tf.cast(tf.reduce_max(target_bbox, axis=2) > 0, 'float32')
 
     # During model building, Keras calls this function with
     # target_class_ids of type float32. Unclear why. Cast it
@@ -1158,9 +1179,9 @@ def mrcnn_bbox_loss_graph(target_bbox, target_class_ids, pred_bbox):
     target_bbox = K.reshape(target_bbox, (-1, 4))
     pred_bbox = K.reshape(pred_bbox, (-1, K.int_shape(pred_bbox)[2], 4))
 
-    # Only positive ROIs contribute to the loss. And only
-    # the right class_id of each ROI. Get their indices.
-    positive_roi_ix = tf.where(target_class_ids > 0)[:, 0]
+    # Zero-padded ROIs do not contribute to the loss. Look for zeros in bboxes
+    # (as zeros in target_class_ids could still just be background class).
+    positive_roi_ix = tf.where(tf.reduce_max(target_bbox, axis=1, keepdims=True) > 0)[:, 0]
     positive_roi_class_ids = tf.cast(
         tf.gather(target_class_ids, positive_roi_ix), tf.int64)
     indices = tf.stack([positive_roi_ix, positive_roi_class_ids], axis=1)
@@ -2070,7 +2091,7 @@ class MaskRCNN():
             rpn_bbox_loss = KL.Lambda(lambda x: rpn_bbox_loss_graph(config, *x), name="rpn_bbox_loss")(
                 [input_rpn_bbox, input_rpn_match, rpn_bbox])
             class_loss = KL.Lambda(lambda x: mrcnn_class_loss_graph(*x), name="mrcnn_class_loss")(
-                [target_class_ids, mrcnn_class_logits, active_class_ids])
+                [rois, target_class_ids, mrcnn_class_logits, active_class_ids])
             bbox_loss = KL.Lambda(lambda x: mrcnn_bbox_loss_graph(*x), name="mrcnn_bbox_loss")(
                 [target_bbox, target_class_ids, mrcnn_bbox])
             mask_loss = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_loss")(
