@@ -700,7 +700,7 @@ class DetectionTargetLayer(KE.Layer):
 #  Detection Layer
 ############################################################
 
-def refine_detections_graph(rois, probs, deltas, window, config):
+def refine_detections_graph(rois, probs, deltas, window, active_class_ids, config):
     """Refine classified proposals and filter overlaps and return final
     detections.
 
@@ -711,10 +711,16 @@ def refine_detections_graph(rois, probs, deltas, window, config):
                 bounding box deltas.
         window: (y1, x1, y2, x2) in normalized coordinates. The part of the image
             that contains the image excluding the padding.
+        active_class_ids: [num_classes]. Has a value of 1 for classes
+            that are allowed in the dataset of the image, and 0 for classes
+            that are not allowed in the dataset.
 
     Returns detections shaped: [num_detections, (y1, x1, y2, x2, class_id, score)] where
         coordinates are normalized.
     """
+    # Suppress scores for inactive classes
+    probs = tf.where(tf.cast(K.tile(K.expand_dims(active_class_ids, 0), (probs.shape[0],1)), tf.bool),
+                     x=probs, y=K.zeros_like(probs))
     # Class IDs per ROI
     class_ids = tf.argmax(probs, axis=1, output_type=tf.int32)
     # Class probability of the top class of each ROI
@@ -813,8 +819,8 @@ class DetectionLayer(KE.Layer):
 
     def call(self, inputs):
         rois = inputs[0]
-        mrcnn_class = inputs[1]
-        mrcnn_bbox = inputs[2]
+        mrcnn_class_probs = inputs[1]
+        mrcnn_bbox_deltas = inputs[2]
         image_meta = inputs[3]
 
         # Get windows of images in normalized coordinates. Windows are the area
@@ -824,11 +830,12 @@ class DetectionLayer(KE.Layer):
         m = parse_image_meta_graph(image_meta)
         image_shape = m['image_shape'][0]
         window = norm_boxes_graph(m['window'], image_shape[:2])
+        active_class_ids = m['active_class_ids']
 
         # Run detection refinement graph on each item in the batch
         detections_batch = utils.batch_slice(
-            [rois, mrcnn_class, mrcnn_bbox, window],
-            lambda x, y, w, z: refine_detections_graph(x, y, w, z, self.config),
+            [rois, mrcnn_class_probs, mrcnn_bbox_deltas, window, active_class_ids],
+            lambda r, p, d, w, c: refine_detections_graph(r, p, d, w, c, self.config),
             self.config.IMAGES_PER_GPU)
 
         # Reshape output
@@ -2478,11 +2485,12 @@ class MaskRCNN():
             use_multiprocessing=False, # True
         )
 
-    def mold_inputs(self, images):
+    def mold_inputs(self, images, active_class_ids=None):
         """Takes a list of images and modifies them to the format expected
         as an input to the neural network.
         images: List of image matrices [height,width,depth]. Images can have
             different sizes.
+        active_class_ids: List of class_ids allowed for the given images.
 
         Returns 3 Numpy matrices:
         molded_images: [N, h, w, 3]. Images resized and normalized.
@@ -2493,6 +2501,11 @@ class MaskRCNN():
         molded_images = []
         image_metas = []
         windows = []
+        if active_class_ids:
+            active_classes = np.zeros([self.config.NUM_CLASSES], dtype=np.int32)
+            active_classes[active_class_ids] = 1
+        else:
+            active_classes = np.ones([self.config.NUM_CLASSES], dtype=np.int32)
         for image in images:
             # Resize image
             # TODO: move resizing to mold_image()
@@ -2506,7 +2519,7 @@ class MaskRCNN():
             # Build image_meta
             image_meta = compose_image_meta(
                 0, image.shape, molded_image.shape, window, scale,
-                np.zeros([self.config.NUM_CLASSES], dtype=np.int32))
+                active_classes)
             # Append
             molded_images.append(molded_image)
             windows.append(window)
@@ -2582,10 +2595,11 @@ class MaskRCNN():
 
         return boxes, class_ids, scores, full_masks
 
-    def detect(self, images, verbose=0):
+    def detect(self, images, verbose=0, active_class_ids=None):
         """Runs the detection pipeline.
 
         images: List of images, potentially of different sizes.
+        active_class_ids: List of class_ids allowed for the given images.
 
         Returns a list of dicts, one dict per image. The dict contains:
         rois: [N, (y1, x1, y2, x2)] detection bounding boxes
@@ -2603,7 +2617,7 @@ class MaskRCNN():
                 log("image", image)
 
         # Mold inputs to format expected by the neural network
-        molded_images, image_metas, windows = self.mold_inputs(images)
+        molded_images, image_metas, windows = self.mold_inputs(images, active_class_ids)
 
         # Validate image sizes
         # All images in a batch MUST be of the same size
