@@ -893,6 +893,9 @@ def resize(image, output_shape, order=1, mode='constant', cval=0, clip=True,
     of skimage. This solves the problem by using different parameters per
     version. And it provides a central place to control resizing defaults.
     """
+    if LooseVersion(skimage.__version__) >= LooseVersion("0.17") and image.dtype == np.bool:
+        # New in 0.17: order > 0 not supported for bool dtype
+        order = 0
     if LooseVersion(skimage.__version__) >= LooseVersion("0.14"):
         # New in 0.14: anti_aliasing. Default it to False for backward
         # compatibility with skimage 0.13.
