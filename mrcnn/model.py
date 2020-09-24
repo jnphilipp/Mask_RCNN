@@ -1148,27 +1148,21 @@ def mrcnn_class_loss_graph(target_bbox, target_class_ids, pred_class_logits,
     # to int to get around it.
     target_class_ids = tf.cast(target_class_ids, 'int64')
 
-    # Find predictions of classes that are not in the dataset.
-    pred_class_ids = tf.argmax(pred_class_logits, axis=2)
-    # TODO: Update this line to work with batch > 1. Right now it assumes all
-    #       images in a batch have the same active_class_ids
-    pred_active = tf.gather(active_class_ids[0], pred_class_ids)
+    # Suppress predictions of classes that are not in the dataset
+    active_class_ids = K.tile(K.expand_dims(active_class_ids, 1), (1,pred_class_logits.shape[1],1))
+    pred_class_logits = pred_class_logits * active_class_ids
 
     # Loss
     loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
         labels=target_class_ids, logits=pred_class_logits)
 
-    # Ensure the shape of loss, pred_active, non_zeros are the same
-    pred_active = tf.reshape(pred_active, tf.shape(loss))
-    non_zeros = tf.reshape(non_zeros, tf.shape(loss))
-
     # Erase losses of predictions of classes that are not in the active
     # classes of the image or is padding.
-    loss = loss * pred_active * non_zeros
+    loss = loss * non_zeros
 
     # Computer loss mean. Use only predictions that contribute
     # to the loss to get a correct mean.
-    denominator = tf.reduce_sum(tf.multiply(pred_active, non_zeros))
+    denominator = tf.reduce_sum(non_zeros)
     loss = tf.cond(tf.not_equal(denominator, 0), 
         lambda: tf.reduce_sum(loss)/denominator, lambda: tf.constant(0, 'float32'))
     return loss
