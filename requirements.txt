@@ -8,5 +8,5 @@ tensorflow-gpu ~= 1.15.2 # mask-rcnn needs < 2.0
 keras ~= 2.2.5 # mask-rcnn needs < 2.3
 opencv-python-headless # no X11
 h5py
-imgaug
+imgaug --no-binary imgaug # workaround imgaug#473 (opencv-python/headless)
 IPython[all]
