@@ -16,20 +16,29 @@ except ImportError:
 def _parse_requirements(file_path):
     pip_ver = pkg_resources.get_distribution('pip').version
     pip_version = list(map(int, pip_ver.split('.')[:2]))
-    if pip_version >= [6, 0]:
-        raw = pip.req.parse_requirements(file_path,
-                                         session=pip.download.PipSession())
+    # parse_requirements() returns generator of pip.req.InstallRequirement objects
+    # (This API is deprecated, cf. https://stackoverflow.com/a/59971236)
+    if pip_version >= [20, 0]:
+        from pip._internal.req import parse_requirements
+        from pip._internal.network.session import PipSession
+        req = 'requirement'
+    elif pip_version >= [10, 0]:
+        from pip._internal.req import parse_requirements
+        from pip.download import PipSession
+        req = 'req'
+    elif pip_version >= [6, 0]:
+        from pip.req import parse_requirements
+        from pip.download import PipSession
+        req = 'req'
     else:
-        raw = pip.req.parse_requirements(file_path)
-    return [str(i.req) for i in raw]
+        from pip.req import parse_requirements
+        req = 'req'
+    raw = parse_requirements(file_path, session=PipSession())
+    return [str(getattr(i, req)) for i in raw]
 
-
-# parse_requirements() returns generator of pip.req.InstallRequirement objects
-try:
-    install_reqs = _parse_requirements("requirements.txt")
-except Exception:
-    logging.warning('Fail load requirements file, so using default ones.')
-    install_reqs = []
+# may raise exceptions if requirements cannot be parsed
+# - let them through
+install_reqs = _parse_requirements("requirements.txt")
 
 setup(
     name='mask-rcnn',
