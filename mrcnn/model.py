@@ -338,7 +338,7 @@ class ProposalLayer(KE.Layer):
 
 def log2_graph(x):
     """Implementation of Log2. TF doesn't have a native implementation."""
-    return tf.log(x) / tf.log(2.0)
+    return tf.math.log(x) / tf.math.log(2.0)
 
 
 class PyramidROIAlign(KE.Layer):
@@ -556,10 +556,11 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config)
     # Positive ROIs
     positive_count = int(config.TRAIN_ROIS_PER_IMAGE *
                          config.ROI_POSITIVE_RATIO)
-    positive_indices = tf.random_shuffle(positive_indices)[:positive_count]
+    positive_indices = tf.random.shuffle(positive_indices)[:positive_count]
     positive_count = tf.shape(positive_indices)[0]
     # Negative ROIs. Add enough to maintain positive:negative ratio.
     r = 1.0 / config.ROI_POSITIVE_RATIO
+
     # But if there are too few or no positive ROIs (because of
     # too few GT instances or too inaccurate RPN), then ensure
     # that we have enough negative ROIs to avoid zero padding.
@@ -568,7 +569,8 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config)
     negative_count = tf.cond(tf.greater(positive_count, 0),
                              true_fn=lambda: tf.cast(r * tf.cast(positive_count, tf.float32), tf.int32) - positive_count,
                              false_fn=lambda: tf.constant(config.TRAIN_ROIS_PER_IMAGE))
-    negative_indices = tf.random_shuffle(negative_indices)[:negative_count]
+    negative_indices = tf.random.shuffle(negative_indices)[:negative_count]
+
     # Gather selected ROIs
     positive_rois = tf.gather(proposals, positive_indices)
     negative_rois = tf.gather(proposals, negative_indices)
@@ -742,9 +744,9 @@ def refine_detections_graph(rois, probs, deltas, window, active_class_ids, confi
     # Filter out low confidence boxes
     if config.DETECTION_MIN_CONFIDENCE:
         conf_keep = tf.where(class_scores >= config.DETECTION_MIN_CONFIDENCE)[:, 0]
-        keep = tf.sets.set_intersection(tf.expand_dims(keep, 0),
+        keep = tf.sets.intersection(tf.expand_dims(keep, 0),
                                         tf.expand_dims(conf_keep, 0))
-        keep = tf.sparse_tensor_to_dense(keep)[0]
+        keep = tf.sparse.to_dense(keep)[0]
 
     # Apply per-class NMS
     # 1. Prepare variables
@@ -780,9 +782,9 @@ def refine_detections_graph(rois, probs, deltas, window, active_class_ids, confi
     nms_keep = tf.reshape(nms_keep, [-1])
     nms_keep = tf.gather(nms_keep, tf.where(nms_keep > -1)[:, 0])
     # 4. Compute intersection between keep and nms_keep
-    keep = tf.sets.set_intersection(tf.expand_dims(keep, 0),
+    keep = tf.sets.intersection(tf.expand_dims(keep, 0),
                                     tf.expand_dims(nms_keep, 0))
-    keep = tf.sparse_tensor_to_dense(keep)[0]
+    keep = tf.sparse.to_dense(keep)[0]
     # Keep top detections
     roi_count = config.DETECTION_MAX_INSTANCES
     class_scores_keep = tf.gather(class_scores, keep)
@@ -794,7 +796,7 @@ def refine_detections_graph(rois, probs, deltas, window, active_class_ids, confi
     # Coordinates are normalized.
     detections = tf.concat([
         tf.gather(refined_rois, keep),
-        tf.to_float(tf.gather(class_ids, keep))[..., tf.newaxis],
+        tf.cast(tf.gather(class_ids, keep), tf.float32)[..., tf.newaxis],
         tf.gather(class_scores, keep)[..., tf.newaxis]
         ], axis=1)
 
@@ -924,7 +926,7 @@ def build_rpn_model(anchor_stride, anchors_per_location, depth):
 ############################################################
 
 def fpn_classifier_graph(rois, feature_maps, image_meta,
-                         pool_size, num_classes, 
+                         pool_size, num_classes,
 			 images_per_gpu,
 			 train_bn=True,
                          fc_layers_size=1024):
@@ -953,7 +955,7 @@ def fpn_classifier_graph(rois, feature_maps, image_meta,
             rois,
             lambda x: trim_zeros_graph(x, name="trim_rois"),
             images_per_gpu)
-    
+
     # ROI Pooling
     # Shape: [batch, num_rois, POOL_SIZE, POOL_SIZE, channels]
     x = PyramidROIAlign([pool_size, pool_size],
@@ -995,13 +997,13 @@ def fpn_classifier_graph(rois, feature_maps, image_meta,
     mrcnn_probs = KL.Lambda(
         lambda x: tf.where(non_zeros, x, K.zeros_like(x)),
         name="mrcnn_class_trimed")(mrcnn_probs)
-    
+
     # non_zeros: [batch, num_rois, num_classes, 4]
     non_zeros = K.tile(K.expand_dims(non_zeros, -1), (1,1,1,4))
     mrcnn_bbox = KL.Lambda(
         lambda x: tf.where(non_zeros, x, K.zeros_like(x)),
         name="mrcnn_bbox_trimed")(mrcnn_bbox)
-    
+
     return mrcnn_class_logits, mrcnn_probs, mrcnn_bbox
 
 
@@ -1120,7 +1122,7 @@ def rpn_bbox_loss_graph(config, target_bbox, rpn_match, rpn_bbox):
                                    config.IMAGES_PER_GPU)
 
     loss = smooth_l1_loss(target_bbox, rpn_bbox)
-    
+
     loss = K.switch(tf.size(loss) > 0, K.mean(loss), tf.constant(0.0))
     return loss
 
@@ -1163,7 +1165,7 @@ def mrcnn_class_loss_graph(target_bbox, target_class_ids, pred_class_logits,
     # Computer loss mean. Use only predictions that contribute
     # to the loss to get a correct mean.
     denominator = tf.reduce_sum(non_zeros)
-    loss = tf.cond(tf.not_equal(denominator, 0), 
+    loss = tf.cond(tf.not_equal(denominator, 0),
         lambda: tf.reduce_sum(loss)/denominator, lambda: tf.constant(0, 'float32'))
     return loss
 
@@ -1765,21 +1767,21 @@ class DataGenerator(keras.utils.Sequence):
         self.augmentation = augmentation
         self.random_rois = random_rois
         self.batch_size = batch_size
-        self.detection_targets = detection_targets     
+        self.detection_targets = detection_targets
         self.no_augmentation_sources = no_augmentation_sources or []
 
-   
+
 
     def __len__(self):
         return int(np.ceil(len(self.image_ids) / float(self.batch_size)))
 
     def __getitem__(self, idx):
         return self.data_generator( self.image_ids[idx*self.batch_size:(idx+1)*self.batch_size] )
-    
+
     def data_generator(self,image_ids):
         b=0
         while b < self.batch_size and b < image_ids.shape[0]:
-            try: 
+            try:
                 # Get GT bounding boxes and masks for image.
                 image_id = image_ids[b]
 
@@ -1890,7 +1892,7 @@ class DataGenerator(keras.utils.Sequence):
                 self.error_count += 1
                 if self.error_count > 5:
                     raise
-    
+
     def on_epoch_end(self):
         if self.shuffle == True:
             np.random.shuffle(self.image_ids)
@@ -2250,14 +2252,16 @@ class MaskRCNN():
         loss_names = [
             "rpn_class_loss",  "rpn_bbox_loss",
             "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_loss"]
+        output_names = []
         for name in loss_names:
             layer = self.keras_model.get_layer(name)
-            if layer.output in self.keras_model.losses:
+            if layer.output.name in output_names:
                 continue
             loss = (
-                tf.reduce_mean(layer.output, keepdims=True)
+                tf.reduce_mean(input_tensor=layer.output, keepdims=True)
                 * self.config.LOSS_WEIGHTS.get(name, 1.))
             self.keras_model.add_loss(loss)
+            output_names.append(layer.output.name)
 
         # Add L2 Regularization
         # Skip gamma and beta weights of batch normalization layers.
@@ -2466,7 +2470,7 @@ class MaskRCNN():
         """
         # require training mode for loss layers
         assert self.mode == "training", "Create model in training mode."
-        
+
         log("Checkpoint Path: {}".format(self.checkpoint_path))
         self.compile(self.config.LEARNING_RATE, self.config.LEARNING_MOMENTUM)
         val_generator = DataGenerator(val_dataset, self.config, shuffle=True,
