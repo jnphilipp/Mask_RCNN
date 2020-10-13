@@ -40,6 +40,10 @@ pip-delete-this-directory.txt
 # PyCharm
 .idea/
 
+# SublimeText
+*.sublime-project
+*.sublime-workspace
+
 # Dropbox
 .dropbox.attr
 
