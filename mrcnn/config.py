@@ -9,6 +9,8 @@ Written by Waleed Abdulla
 
 import numpy as np
 
+from typing import Optional
+
 
 # Base Configuration Class
 # Don't use this class directly. Instead, sub-class it and override
@@ -22,7 +24,7 @@ class Config(object):
     # Name the configurations. For example, 'COCO', 'Experiment 3', ...etc.
     # Useful if your code needs to do things differently depending on which
     # experiment is running.
-    NAME = None  # Override in sub-classes
+    NAME: Optional[str] = None  # Override in sub-classes
 
     # NUMBER OF GPUs to use. When using only a CPU, this needs to be set to 1.
     GPU_COUNT = 1
@@ -90,7 +92,7 @@ class Config(object):
 
     # How many anchors per image to use for RPN training
     RPN_TRAIN_ANCHORS_PER_IMAGE = 256
-    
+
     # ROIs kept after tf.nn.top_k and before non-maximum suppression
     PRE_NMS_LIMIT = 6000
 
@@ -155,7 +157,7 @@ class Config(object):
 
     # Shape of output mask
     # To change this you also need to change the neural network mask branch
-    MASK_SHAPE = [28, 28]
+    MASK_SHAPE = (28, 28)
 
     # Maximum number of ground truth instances to use in one image
     MAX_GT_INSTANCES = 100
@@ -187,11 +189,11 @@ class Config(object):
     # Loss weights for more precise optimization.
     # Can be used for R-CNN training setup.
     LOSS_WEIGHTS = {
-        "rpn_class_loss": 1.,
-        "rpn_bbox_loss": 1.,
-        "mrcnn_class_loss": 1.,
-        "mrcnn_bbox_loss": 1.,
-        "mrcnn_mask_loss": 1.
+        'rpn_class_loss': 1.,
+        'rpn_bbox_loss': 1.,
+        'mrcnn_class_loss': 1.,
+        'mrcnn_bbox_loss': 1.,
+        'mrcnn_mask_loss': 1.
     }
 
     # Use RPN ROIs or externally generated ROIs for training
@@ -216,21 +218,29 @@ class Config(object):
         self.BATCH_SIZE = self.IMAGES_PER_GPU * self.GPU_COUNT
 
         # Input image size
-        if self.IMAGE_RESIZE_MODE == "crop":
-            self.IMAGE_SHAPE = np.array([self.IMAGE_MIN_DIM, self.IMAGE_MIN_DIM,
-                self.IMAGE_CHANNEL_COUNT])
+        if self.IMAGE_RESIZE_MODE == 'crop':
+            self.IMAGE_SHAPE = np.array([self.IMAGE_MIN_DIM,
+                                         self.IMAGE_MIN_DIM,
+                                         self.IMAGE_CHANNEL_COUNT])
         else:
-            self.IMAGE_SHAPE = np.array([self.IMAGE_MAX_DIM, self.IMAGE_MAX_DIM,
-                self.IMAGE_CHANNEL_COUNT])
+            self.IMAGE_SHAPE = np.array([self.IMAGE_MAX_DIM,
+                                         self.IMAGE_MAX_DIM,
+                                         self.IMAGE_CHANNEL_COUNT])
 
         # Image meta data length
         # See compose_image_meta() for details
         self.IMAGE_META_SIZE = 1 + 3 + 3 + 4 + 1 + self.NUM_CLASSES
 
+    def to_dict(self):
+        return {
+            a: getattr(self, a)
+            for a in sorted(dir(self)) if not a.startswith("__") and
+            not callable(getattr(self, a))
+        }
+
     def display(self):
         """Display Configuration values."""
-        print("\nConfigurations:")
-        for a in dir(self):
-            if not a.startswith("__") and not callable(getattr(self, a)):
-                print("{:30} {}".format(a, getattr(self, a)))
-        print("\n")
+        print('\nConfigurations:')
+        for key, val in self.to_dict().items():
+            print(f'{key:30} {val}')
+        print('\n')
