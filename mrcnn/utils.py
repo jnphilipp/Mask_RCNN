@@ -21,10 +21,44 @@ import skimage.transform
 import urllib.request
 import shutil
 import warnings
+
 from distutils.version import LooseVersion
+from mrcnn.config import Config
+from typing import Tuple
 
 # URL from which to download the latest COCO trained weights
 COCO_MODEL_URL = "https://github.com/matterport/Mask_RCNN/releases/download/v2.0/mask_rcnn_coco.h5"
+ANCHORS_CACHE = {}
+
+
+############################################################
+#  Anchors
+############################################################
+
+def get_anchors(image_shape: Tuple[int, int], config: Config):
+    """Returns anchor pyramid for the given image size."""
+    global ANCHORS_CACHE
+
+    # Computes the width and height of each stage of the backbone network.
+    # [N, (height, width)]. Where N is the number of stages
+    if callable(config.BACKBONE):
+        backbone_shapes = config.COMPUTE_BACKBONE_SHAPE(image_shape)
+
+    # Currently supports ResNet only
+    assert config.BACKBONE in ['resnet50', 'resnet101']
+    backbone_shapes = np.array([[int(math.ceil(image_shape[0] / stride)),
+                                 int(math.ceil(image_shape[1] / stride))]
+                                for stride in config.BACKBONE_STRIDES])
+
+    # Cache anchors and reuse if image shape is the same
+    if not tuple(image_shape) in ANCHORS_CACHE:
+        # Generate Anchors
+        a = generate_pyramid_anchors(config.RPN_ANCHOR_SCALES, config.RPN_ANCHOR_RATIOS,
+                                     backbone_shapes, config.BACKBONE_STRIDES,
+                                     config.RPN_ANCHOR_STRIDE)
+        # Normalize coordinates
+        ANCHORS_CACHE[tuple(image_shape)] = norm_boxes(a, image_shape[:2])
+    return ANCHORS_CACHE[tuple(image_shape)]
 
 
 ############################################################
@@ -761,10 +795,10 @@ def compute_ap_range(gt_box, gt_class_id, gt_mask,
     # Compute AP over range of IoU thresholds
     AP = []
     for iou_threshold in iou_thresholds:
-        ap, precisions, recalls, overlaps =\
-            compute_ap(gt_box, gt_class_id, gt_mask,
-                        pred_box, pred_class_id, pred_score, pred_mask,
-                        iou_threshold=iou_threshold)
+        ap, precisions, recalls, overlaps = compute_ap(gt_box, gt_class_id, gt_mask,
+                                                       pred_box, pred_class_id,
+                                                       pred_score, pred_mask,
+                                                       iou_threshold=iou_threshold)
         if verbose:
             print("AP @{:.2f}:\t {:.3f}".format(iou_threshold, ap))
         AP.append(ap)

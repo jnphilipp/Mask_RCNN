@@ -212,6 +212,16 @@ class Config(object):
     # Gradient norm clipping
     GRADIENT_CLIP_NORM = 5.0
 
+    # Image meta position informations
+    IMAGE_META = {
+        'image_id': 0,
+        'original_image_shape': (1, 4),
+        'image_shape': (4, 7),
+        'window': (7, 11),  # (y1, x1, y2, x2) window of image in in pixels
+        'scale': 11,
+        'active_class_ids': 12,
+    }
+
     def __init__(self):
         """Set values of computed attributes."""
         # Effective batch size
@@ -229,7 +239,7 @@ class Config(object):
 
         # Image meta data length
         # See compose_image_meta() for details
-        self.IMAGE_META_SIZE = 1 + 3 + 3 + 4 + 1 + self.NUM_CLASSES
+        self.IMAGE_META['size'] = 1 + 3 + 3 + 4 + 1 + self.NUM_CLASSES
 
     def to_dict(self):
         return {
