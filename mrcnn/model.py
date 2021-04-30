@@ -2596,8 +2596,8 @@ class MaskRCNN():
 
         return boxes, class_ids, scores, full_masks
 
-    def detect(self, images, verbose=0, active_class_ids=None):
-        """Runs the detection pipeline.
+    def detect(self, images, verbose=0, active_class_ids=None, callbacks=None):
+        """Runs the detection pipeline, automatically splitting the data into batches.
 
         images: List of images, potentially of different sizes.
         active_class_ids: List of class_ids allowed for the given images. Or
@@ -2609,10 +2609,10 @@ class MaskRCNN():
         scores: [N] float probability scores for the class IDs
         masks: [H, W, N] instance binary masks
         """
+        # FIXME: Allow passing a generator for `images`, delegating to model.predict()
+        #        so we can do CPU-side pre- and postprocessing in parallel to GPU-side
+        #        inference.
         assert self.mode == "inference", "Create model in inference mode."
-        assert len(
-            images) == self.config.BATCH_SIZE, "len(images) must be equal to BATCH_SIZE"
-
         if verbose:
             log("Processing {} images".format(len(images)))
             for image in images:
@@ -2632,7 +2632,7 @@ class MaskRCNN():
         anchors = self.get_anchors(image_shape)
         # Duplicate across the batch dimension because Keras requires it
         # TODO: can this be optimized to avoid duplicating the anchors?
-        anchors = np.broadcast_to(anchors, (self.config.BATCH_SIZE,) + anchors.shape)
+        anchors = np.broadcast_to(anchors, (len(images),) + anchors.shape)
 
         if verbose:
             log("molded_images", molded_images)
@@ -2640,7 +2640,11 @@ class MaskRCNN():
             log("anchors", anchors)
         # Run object detection
         detections, _, _, mrcnn_mask, _, _, _ =\
-            self.keras_model.predict([molded_images, image_metas, anchors], verbose=0)
+            self.keras_model.predict([molded_images, image_metas, anchors],
+                                     # let Keras do the batch de/muxing:
+                                     batch_size=self.config.BATCH_SIZE,
+                                     callbacks=callbacks,
+                                     verbose=0)
         # Process detections
         results = []
         for i, image in enumerate(images):
@@ -2656,10 +2660,10 @@ class MaskRCNN():
             })
         return results
 
-    def detect_molded(self, molded_images, image_metas, verbose=0):
-        """Runs the detection pipeline, but expect inputs that are
-        molded already. Used mostly for debugging and inspecting
-        the model.
+    def detect_molded(self, molded_images, image_metas, verbose=0, callbacks=None):
+        """Runs the detection pipeline, automatically splitting the data into batches,
+        but expect inputs that are molded already. 
+        Used mostly for debugging and inspecting the model.
 
         molded_images: List of images loaded using load_image_gt()
         image_metas: image meta data, also returned by load_image_gt()
@@ -2671,9 +2675,6 @@ class MaskRCNN():
         masks: [H, W, N] instance binary masks
         """
         assert self.mode == "inference", "Create model in inference mode."
-        assert len(molded_images) == self.config.BATCH_SIZE,\
-            "Number of images must be equal to BATCH_SIZE"
-
         if verbose:
             log("Processing {} images".format(len(molded_images)))
             for image in molded_images:
@@ -2689,7 +2690,7 @@ class MaskRCNN():
         anchors = self.get_anchors(image_shape)
         # Duplicate across the batch dimension because Keras requires it
         # TODO: can this be optimized to avoid duplicating the anchors?
-        anchors = np.broadcast_to(anchors, (self.config.BATCH_SIZE,) + anchors.shape)
+        anchors = np.broadcast_to(anchors, (len(images),) + anchors.shape)
 
         if verbose:
             log("molded_images", molded_images)
@@ -2697,7 +2698,11 @@ class MaskRCNN():
             log("anchors", anchors)
         # Run object detection
         detections, _, _, mrcnn_mask, _, _, _ =\
-            self.keras_model.predict([molded_images, image_metas, anchors], verbose=0)
+            self.keras_model.predict([molded_images, image_metas, anchors],
+                                     # let Keras do the batch de/muxing:
+                                     batch_size=self.config.BATCH_SIZE,
+                                     callbacks=callbacks,
+                                     verbose=0)
         # Process detections
         results = []
         for i, image in enumerate(molded_images):
