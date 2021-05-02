@@ -1702,7 +1702,7 @@ def generate_random_rois(image_shape, count, gt_class_ids, gt_boxes):
 
 class DataGenerator(keras.utils.Sequence):
     """A generator that returns images and corresponding target class ids,
-    bounding box deltas, and masks.
+    bounding box deltas, and masks (to be used during training).
 
     dataset: The Dataset object to pick data from
     config: The model config object
@@ -1895,6 +1895,88 @@ class DataGenerator(keras.utils.Sequence):
         if self.shuffle == True:
             np.random.shuffle(self.image_ids)
 
+class InferenceDataGenerator(keras.utils.Sequence):
+    """A generator that returns images in batches (to be used during inference by detect_generator).
+
+    dataset: The Dataset object to pick data from
+    config: The model config object (including BATCH_SIZE)
+
+    Returns a Python generator. Upon calling next() on it, the
+    generator returns 3 lists, corresponding to the 3 network inputs:
+    - images: [batch, H, W, C]
+    - image_meta: [batch, (meta data)] Image details. See compose_image_meta()
+    - image_anchors: [batch, (anchor data)] Image anchors. See get_anchors()
+    """
+
+    def __init__(self, dataset, config, image_ids=None):
+
+        self.image_ids = np.copy(dataset.image_ids) if image_ids is None else image_ids
+        self.dataset = dataset
+        self.config = config
+        self.batch_size = config.BATCH_SIZE
+        self.error_count = 0
+        # Anchors
+        # [anchor_count, (y1, x1, y2, x2)]
+        self.backbone_shapes = compute_backbone_shapes(config, config.IMAGE_SHAPE)
+        self.anchors = utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
+                                                      config.RPN_ANCHOR_RATIOS,
+                                                      self.backbone_shapes,
+                                                      config.BACKBONE_STRIDES,
+                                                      config.RPN_ANCHOR_STRIDE)
+        self.anchors = utils.norm_boxes(self.anchors, config.IMAGE_SHAPE[:2])
+
+    def __len__(self):
+        return int(np.ceil(len(self.image_ids) / float(self.batch_size)))
+
+    def __getitem__(self, idx):
+        return self.data_generator( self.image_ids[idx*self.batch_size:(idx+1)*self.batch_size] )
+
+    def data_generator(self,image_ids):
+        b=0
+        while b < self.batch_size and b < image_ids.shape[0]:
+            try:
+                # Get GT bounding boxes and masks for image.
+                image_id = image_ids[b]
+                image = self.dataset.load_image(image_id)
+                image_source = self.dataset.image_info[image_id]['source']
+                active_class_ids = self.dataset.source_class_ids[image_source]
+                if active_class_ids:
+                    classes = np.zeros(self.config.NUM_CLASSES, dtype=np.int32)
+                    classes[active_class_ids] = 1
+                else:
+                    classes = np.ones(self.config.NUM_CLASSES, dtype=np.int32)
+                # Mold inputs to format expected by the neural network
+                molded_image, image_meta, window = mold_input(image, self.config,
+                                                              active_classes=classes,
+                                                              image_id=image_id)
+
+                # Init batch arrays
+                if b == 0:
+                    batch_image_meta = np.zeros(
+                        (self.batch_size,) + image_meta.shape, dtype=image_meta.dtype)
+                    batch_images = np.zeros(
+                        (self.batch_size,) + molded_image.shape, dtype=molded_image.dtype)
+                    batch_anchors = np.zeros(
+                        (self.batch_size,) + self.anchors.shape, dtype=self.anchors.dtype)
+                # Add to batch
+                batch_image_meta[b] = image_meta
+                batch_images[b] = molded_image
+                batch_anchors[b] = self.anchors
+                b += 1
+
+                # Batch full?
+                if b >= self.batch_size:
+                    return [batch_images, batch_image_meta, batch_anchors]
+
+            except (GeneratorExit, KeyboardInterrupt):
+                raise
+            except:
+                # Log it and skip the image
+                logging.exception("Error processing image {}".format(
+                    self.dataset.image_info[image_id]))
+                self.error_count += 1
+                if self.error_count > 5:
+                    raise
 
 ############################################################
 #  MaskRCNN Class
@@ -2138,7 +2220,9 @@ class MaskRCNN():
 
             model = KM.Model([input_image, input_image_meta, input_anchors],
                              [detections, mrcnn_class, mrcnn_bbox,
-                                 mrcnn_mask, rpn_rois, rpn_class, rpn_bbox],
+                              mrcnn_mask, rpn_rois, rpn_class, rpn_bbox,
+                              # output image_metas to facilitate unmolding
+                              KL.Lambda(lambda x: x)(input_image_meta)],
                              name='mask_rcnn')
 
         # Add multi-GPU support.
@@ -2479,123 +2563,6 @@ class MaskRCNN():
             use_multiprocessing=False, # True
         )
 
-    def mold_inputs(self, images, active_class_ids=None):
-        """Takes a list of images and modifies them to the format expected
-        as an input to the neural network.
-        images: List of image matrices [height,width,depth]. Images can have
-            different sizes.
-        active_class_ids: List of class_ids allowed for the given images. Or
-            boolean matrix [images, classes].
-
-        Returns 3 Numpy matrices:
-        molded_images: [N, h, w, 3]. Images resized and normalized.
-        image_metas: [N, length of meta data]. Details about each image.
-        windows: [N, (y1, x1, y2, x2)]. The portion of the image that has the
-            original image (padding excluded).
-        """
-        molded_images = []
-        image_metas = []
-        windows = []
-        if isinstance(active_class_ids, np.ndarray):
-            assert active_class_ids.shape == (len(images), self.config.NUM_CLASSES), \
-                "active_class_ids dimensions must match number of images and classes"
-            active_classes = active_class_ids
-        elif active_class_ids:
-            active_classes = np.zeros([self.config.NUM_CLASSES], dtype=np.int32)
-            active_classes[active_class_ids] = 1
-            active_classes = np.tile(active_classes, (len(images), 1))
-        else:
-            active_classes = np.ones([self.config.NUM_CLASSES], dtype=np.int32)
-            active_classes = np.tile(active_classes, (len(images), 1))
-        for i, image in enumerate(images):
-            # Resize image
-            # TODO: move resizing to mold_image()
-            molded_image, window, scale, padding, crop = utils.resize_image(
-                image,
-                min_dim=self.config.IMAGE_MIN_DIM,
-                min_scale=self.config.IMAGE_MIN_SCALE,
-                max_dim=self.config.IMAGE_MAX_DIM,
-                mode=self.config.IMAGE_RESIZE_MODE)
-            molded_image = mold_image(molded_image, self.config)
-            # Build image_meta
-            image_meta = compose_image_meta(
-                0, image.shape, molded_image.shape, window, scale,
-                active_classes[i])
-            # Append
-            molded_images.append(molded_image)
-            windows.append(window)
-            image_metas.append(image_meta)
-        # Pack into arrays
-        molded_images = np.stack(molded_images)
-        image_metas = np.stack(image_metas)
-        windows = np.stack(windows)
-        return molded_images, image_metas, windows
-
-    def unmold_detections(self, detections, mrcnn_mask, original_image_shape,
-                          image_shape, window):
-        """Reformats the detections of one image from the format of the neural
-        network output to a format suitable for use in the rest of the
-        application.
-
-        detections: [N, (y1, x1, y2, x2, class_id, score)] in normalized coordinates
-        mrcnn_mask: [N, height, width, num_classes]
-        original_image_shape: [H, W, C] Original image shape before resizing
-        image_shape: [H, W, C] Shape of the image after resizing and padding
-        window: [y1, x1, y2, x2] Pixel coordinates of box in the image where the real
-                image is excluding the padding.
-
-        Returns:
-        boxes: [N, (y1, x1, y2, x2)] Bounding boxes in pixels
-        class_ids: [N] Integer class IDs for each bounding box
-        scores: [N] Float probability scores of the class_id
-        masks: [height, width, num_instances] Instance masks
-        """
-        # How many detections do we have?
-        # Detections array is padded with zeros. Find the first class_id == 0.
-        zero_ix = np.where(detections[:, 4] == 0)[0]
-        N = zero_ix[0] if zero_ix.shape[0] > 0 else detections.shape[0]
-
-        # Extract boxes, class_ids, scores, and class-specific masks
-        boxes = detections[:N, :4]
-        class_ids = detections[:N, 4].astype(np.int32)
-        scores = detections[:N, 5]
-        masks = mrcnn_mask[np.arange(N), :, :, class_ids]
-
-        # Translate normalized coordinates in the resized image to pixel
-        # coordinates in the original image before resizing
-        window = utils.norm_boxes(window, image_shape[:2])
-        wy1, wx1, wy2, wx2 = window
-        shift = np.array([wy1, wx1, wy1, wx1])
-        wh = wy2 - wy1  # window height
-        ww = wx2 - wx1  # window width
-        scale = np.array([wh, ww, wh, ww])
-        # Convert boxes to normalized coordinates on the window
-        boxes = np.divide(boxes - shift, scale)
-        # Convert boxes to pixel coordinates on the original image
-        boxes = utils.denorm_boxes(boxes, original_image_shape[:2])
-
-        # Filter out detections with zero area. Happens in early training when
-        # network weights are still random
-        exclude_ix = np.where(
-            (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]) <= 0)[0]
-        if exclude_ix.shape[0] > 0:
-            boxes = np.delete(boxes, exclude_ix, axis=0)
-            class_ids = np.delete(class_ids, exclude_ix, axis=0)
-            scores = np.delete(scores, exclude_ix, axis=0)
-            masks = np.delete(masks, exclude_ix, axis=0)
-            N = class_ids.shape[0]
-
-        # Resize masks to original image size and set boundary threshold.
-        full_masks = []
-        for i in range(N):
-            # Convert neural network mask to full size mask
-            full_mask = utils.unmold_mask(masks[i], boxes[i], original_image_shape)
-            full_masks.append(full_mask)
-        full_masks = np.stack(full_masks, axis=-1)\
-            if full_masks else np.empty(original_image_shape[:2] + (0,))
-
-        return boxes, class_ids, scores, full_masks
-
     def detect(self, images, verbose=0, active_class_ids=None, callbacks=None):
         """Runs the detection pipeline, automatically splitting the data into batches.
 
@@ -2603,15 +2570,13 @@ class MaskRCNN():
         active_class_ids: List of class_ids allowed for the given images. Or
                           Boolean matrix [images, classes].
 
-        Returns a list of dicts, one dict per image. The dict contains:
+        Returns an in-order list of dicts, one dict per image. The dict contains:
+        image_id: Integer image identifier as provided by the generator's image_metas output.
         rois: [N, (y1, x1, y2, x2)] detection bounding boxes
         class_ids: [N] int class IDs
         scores: [N] float probability scores for the class IDs
         masks: [H, W, N] instance binary masks
         """
-        # FIXME: Allow passing a generator for `images`, delegating to model.predict()
-        #        so we can do CPU-side pre- and postprocessing in parallel to GPU-side
-        #        inference.
         assert self.mode == "inference", "Create model in inference mode."
         if verbose:
             log("Processing {} images".format(len(images)))
@@ -2619,7 +2584,7 @@ class MaskRCNN():
                 log("image", image)
 
         # Mold inputs to format expected by the neural network
-        molded_images, image_metas, windows = self.mold_inputs(images, active_class_ids)
+        molded_images, image_metas, windows = mold_inputs(images, self.config, active_class_ids)
 
         # Validate image sizes
         # All images in a batch MUST be of the same size
@@ -2629,7 +2594,7 @@ class MaskRCNN():
                 "After resizing, all images must have the same size. Check IMAGE_RESIZE_MODE and image sizes."
 
         # Anchors
-        anchors = self.get_anchors(image_shape)
+        anchors = self.get_anchors(image_shape) # is cached
         # Duplicate across the batch dimension because Keras requires it
         # TODO: can this be optimized to avoid duplicating the anchors?
         anchors = np.broadcast_to(anchors, (len(images),) + anchors.shape)
@@ -2639,26 +2604,14 @@ class MaskRCNN():
             log("image_metas", image_metas)
             log("anchors", anchors)
         # Run object detection
-        detections, _, _, mrcnn_mask, _, _, _ =\
-            self.keras_model.predict([molded_images, image_metas, anchors],
-                                     # let Keras do the batch de/muxing:
-                                     batch_size=self.config.BATCH_SIZE,
-                                     callbacks=callbacks,
-                                     verbose=0)
+        outputs = self.keras_model.predict(
+            [molded_images, image_metas, anchors],
+            # let Keras do the batch de/muxing:
+            batch_size=self.config.BATCH_SIZE,
+            callbacks=callbacks,
+            verbose=0)
         # Process detections
-        results = []
-        for i, image in enumerate(images):
-            final_rois, final_class_ids, final_scores, final_masks =\
-                self.unmold_detections(detections[i], mrcnn_mask[i],
-                                       image.shape, molded_images[i].shape,
-                                       windows[i])
-            results.append({
-                "rois": final_rois,
-                "class_ids": final_class_ids,
-                "scores": final_scores,
-                "masks": final_masks,
-            })
-        return results
+        return unmold_outputs(*outputs)
 
     def detect_molded(self, molded_images, image_metas, verbose=0, callbacks=None):
         """Runs the detection pipeline, automatically splitting the data into batches,
@@ -2668,7 +2621,8 @@ class MaskRCNN():
         molded_images: List of images loaded using load_image_gt()
         image_metas: image meta data, also returned by load_image_gt()
 
-        Returns a list of dicts, one dict per image. The dict contains:
+        Returns an in-order list of dicts, one dict per image. The dict contains:
+        image_id: Integer image identifier as provided by the generator's image_metas output.
         rois: [N, (y1, x1, y2, x2)] detection bounding boxes
         class_ids: [N] int class IDs
         scores: [N] float probability scores for the class IDs
@@ -2697,27 +2651,43 @@ class MaskRCNN():
             log("image_metas", image_metas)
             log("anchors", anchors)
         # Run object detection
-        detections, _, _, mrcnn_mask, _, _, _ =\
-            self.keras_model.predict([molded_images, image_metas, anchors],
-                                     # let Keras do the batch de/muxing:
-                                     batch_size=self.config.BATCH_SIZE,
-                                     callbacks=callbacks,
-                                     verbose=0)
+        outputs = self.keras_model.predict(
+            [molded_images, image_metas, anchors],
+            # let Keras do the batch de/muxing:
+            batch_size=self.config.BATCH_SIZE,
+            callbacks=callbacks,
+            verbose=0)
         # Process detections
-        results = []
-        for i, image in enumerate(molded_images):
-            window = [0, 0, image.shape[0], image.shape[1]]
-            final_rois, final_class_ids, final_scores, final_masks =\
-                self.unmold_detections(detections[i], mrcnn_mask[i],
-                                       image.shape, molded_images[i].shape,
-                                       window)
-            results.append({
-                "rois": final_rois,
-                "class_ids": final_class_ids,
-                "scores": final_scores,
-                "masks": final_masks,
-            })
-        return results
+        return unmold_outputs(*outputs)
+
+    def detect_generator(self, batches, callbacks=None, max_queue_size=10, workers=1, verbose=0):
+        """Runs the detection pipeline, queueing input from CPU context parallel to prediction.
+
+        batches: Sequence generator of images, potentially of different sizes.
+                 (Use InferenceDataGenerator to supply data from a Dataset object.)
+        (See keras.Model.predict_generator() for other arguments.)
+
+        Returns an in-order list of dicts, one dict per image. The dict contains:
+        image_id: Integer image identifier as provided by the generator's image_metas output.
+        rois: [N, (y1, x1, y2, x2)] detection bounding boxes
+        class_ids: [N] int class IDs
+        scores: [N] float probability scores for the class IDs
+        masks: [H, W, N] instance binary masks
+        """
+        assert self.mode == "inference", "Create model in inference mode."
+        assert KE.training_utils.is_sequence(batches), \
+            "Needs a keras.utils.Sequence generator for thread-safety, order preservation and non-duplication"
+        # Run object detection
+        outputs = self.keras_model.predict_generator(
+            batches,
+            steps=None, # automatically inferred from Sequence
+            callbacks=callbacks,
+            max_queue_size=max_queue_size,
+            workers=workers,
+            use_multiprocessing=False, # threads are enough (less mem)
+            verbose=verbose)
+        # Process detections
+        return unmold_outputs(*outputs)
 
     def get_anchors(self, image_shape):
         """Returns anchor pyramid for the given image size."""
@@ -2818,7 +2788,7 @@ class MaskRCNN():
 
         # Prepare inputs
         if image_metas is None:
-            molded_images, image_metas, _ = self.mold_inputs(images)
+            molded_images, image_metas, _ = mold_inputs(images, self.config)
         else:
             molded_images = images
         image_shape = molded_images[0].shape
@@ -2918,6 +2888,179 @@ def parse_image_meta_graph(meta):
         "active_class_ids": active_class_ids,
     }
 
+def mold_inputs(images, config, active_class_ids=None):
+    """Takes a list of images and modifies them to the format expected
+    as an input to the neural network.
+    images: List of image matrices [height,width,depth]. Images can have
+        different sizes.
+    config: the model config object
+    active_class_ids: List of class_ids allowed for the given images. Or
+        boolean matrix [images, classes].
+
+    Returns 3 Numpy matrices:
+    molded_images: [N, h, w, 3]. Images resized and normalized.
+    image_metas: [N, length of meta data]. Details about each image.
+    windows: [N, (y1, x1, y2, x2)]. The portion of the image that has the
+        original image (padding excluded).
+    """
+    molded_images = []
+    image_metas = []
+    windows = []
+    if isinstance(active_class_ids, np.ndarray):
+        assert active_class_ids.shape == (len(images), config.NUM_CLASSES), \
+            "active_class_ids dimensions must match number of images and classes"
+    elif active_class_ids:
+        active_classes = np.zeros([config.NUM_CLASSES], dtype=np.int32)
+        active_classes[active_class_ids] = 1
+        active_class_ids = np.tile(active_classes, (len(images), 1))
+    else:
+        active_classes = np.ones([config.NUM_CLASSES], dtype=np.int32)
+        active_class_ids = np.tile(active_classes, (len(images), 1))
+    for i, image in enumerate(images):
+        molded_image, image_meta, window = mold_input(image, config,
+                                                      image_id=i,
+                                                      active_classes=active_class_ids[i])
+        # Append
+        molded_images.append(molded_image)
+        windows.append(window)
+        image_metas.append(image_meta)
+    # Pack into arrays
+    molded_images = np.stack(molded_images)
+    image_metas = np.stack(image_metas)
+    windows = np.stack(windows)
+    return molded_images, image_metas, windows
+
+def mold_input(image, config, active_classes=None, image_id=0):
+    # Resize image
+    # TODO: move resizing to mold_image()
+    molded_image, window, scale, padding, crop = utils.resize_image(
+        image,
+        min_dim=config.IMAGE_MIN_DIM,
+        min_scale=config.IMAGE_MIN_SCALE,
+        max_dim=config.IMAGE_MAX_DIM,
+        mode=config.IMAGE_RESIZE_MODE)
+    if active_classes is None:
+        active_classes = [1] * config.NUM_CLASSES
+    # standardize dynamic range
+    molded_image = mold_image(molded_image, config)
+    # Build image_meta
+    image_meta = compose_image_meta(image_id, image.shape, molded_image.shape,
+                                    window, scale, active_classes)
+    return molded_image, image_meta, window
+
+def unmold_outputs(detections, mrcnn_class, mrcnn_bbox, mrcnn_mask,
+                   rpn_rois, rpn_class, rpn_bbox, image_metas):
+    """Reformats the inference results for a list of images from the output of the
+    neural network to a format suitable for use in the rest of the application.
+
+    detections: [batch, N, (y1, x1, y2, x2, class_id, score)]
+                RoIs in normalized coordinates.
+    mrcnn_class: [batch, N, NUM_CLASSES]
+                 RoI classifier probabilities. Zero padded. (Not used here.)
+    mrcnn_bbox: [batch, N, NUM_CLASSES, (dy, dx, log(dh), log(dw))]
+                Deltas to apply to proposal boxes. Zero padded. (Not used here.)
+    mrcnn_mask: [batch, N, height, width, num_classes]
+                RoI pixel masks.
+    rpn_rois: [batch, N, (y1, x1, y2, x2)]
+              Region proposals in normalized coordinates. (Not used here.)
+    rpn_class: [batch, H * W * anchors_per_location, 2]
+               Anchor classifier probabilities. (Not used here.)
+    rpn_bbox: [batch, H * W * anchors_per_location, (dy, dx, log(dh), log(dw))]
+              Deltas to be applied to anchors. (Not used here.)
+    image_metas: [batch, (meta data)] (See compose_image_meta())
+                 Image details including original size and position.
+
+    Returns a list of dicts, one dict per image. The dict contains:
+    image_id: Integer image identifier as provided by the image_metas.
+    rois: [N, (y1, x1, y2, x2)] detection bounding boxes
+    class_ids: [N] int class IDs
+    scores: [N] float probability scores for the class IDs
+    masks: [H, W, N] instance binary masks
+    """
+    image_metas = parse_image_meta(image_metas)
+    results = []
+    for i in range(len(detections)):
+        final_rois, final_class_ids, final_scores, final_masks = (
+            unmold_detections(detections[i], mrcnn_mask[i],
+                              image_metas['original_image_shape'][i],
+                              image_metas['image_shape'][i],
+                              image_metas['window'][i]))
+        results.append({
+            "image_id": image_metas['image_id'][i],
+            "rois": final_rois,
+            "class_ids": final_class_ids,
+            "scores": final_scores,
+            "masks": final_masks,
+        })
+    return results
+
+def unmold_detections(detections, mrcnn_mask, original_image_shape, image_shape, window):
+    """Reformats the inference results for one image from the output of the neural
+    network to a format suitable for use in the rest of the application.
+
+    detections: [N, (y1, x1, y2, x2, class_id, score)]
+                RoIs in normalized coordinates.
+    mrcnn_mask: [N, height, width, num_classes]
+                RoI pixel masks.
+    original_image_shape: [H, W, C]
+                          Original image shape before resizing
+    image_shape: [H, W, C]
+                 Shape of the image after resizing and padding
+    window: [y1, x1, y2, x2]
+            Pixel coordinates of box in the image where the real image
+            is excluding the padding.
+
+    Returns:
+    boxes: [N, (y1, x1, y2, x2)] Bounding boxes in pixels
+    class_ids: [N] Integer class IDs for each bounding box
+    scores: [N] Float probability scores of the class_id
+    masks: [height, width, num_instances] Instance masks
+    """
+    # How many detections do we have?
+    # Detections array is padded with zeros. Find the first class_id == 0.
+    zero_ix = np.where(detections[:, 4] == 0)[0]
+    N = zero_ix[0] if zero_ix.shape[0] > 0 else detections.shape[0]
+
+    # Extract boxes, class_ids, scores, and class-specific masks
+    boxes = detections[:N, :4]
+    class_ids = detections[:N, 4].astype(np.int32)
+    scores = detections[:N, 5]
+    masks = mrcnn_mask[np.arange(N), :, :, class_ids]
+
+    # Translate normalized coordinates in the resized image to pixel
+    # coordinates in the original image before resizing
+    window = utils.norm_boxes(window, image_shape[:2])
+    wy1, wx1, wy2, wx2 = window
+    shift = np.array([wy1, wx1, wy1, wx1])
+    wh = wy2 - wy1  # window height
+    ww = wx2 - wx1  # window width
+    scale = np.array([wh, ww, wh, ww])
+    # Convert boxes to normalized coordinates on the window
+    boxes = np.divide(boxes - shift, scale)
+    # Convert boxes to pixel coordinates on the original image
+    boxes = utils.denorm_boxes(boxes, original_image_shape[:2])
+
+    # Filter out detections with zero area. Happens in early training when
+    # network weights are still random
+    exclude_ix = np.where(
+        (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]) <= 0)[0]
+    if exclude_ix.shape[0] > 0:
+        boxes = np.delete(boxes, exclude_ix, axis=0)
+        class_ids = np.delete(class_ids, exclude_ix, axis=0)
+        scores = np.delete(scores, exclude_ix, axis=0)
+        masks = np.delete(masks, exclude_ix, axis=0)
+        N = class_ids.shape[0]
+
+    # Resize masks to original image size and set boundary threshold.
+    full_masks = []
+    for i in range(N):
+        # Convert neural network mask to full size mask
+        full_mask = utils.unmold_mask(masks[i], boxes[i], original_image_shape)
+        full_masks.append(full_mask)
+    full_masks = np.stack(full_masks, axis=-1)\
+        if full_masks else np.empty(original_image_shape[:2] + (0,))
+
+    return boxes, class_ids, scores, full_masks
 
 def mold_image(images, config):
     """Expects an RGB image (or array of images) and subtracts
