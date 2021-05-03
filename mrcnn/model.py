@@ -1863,24 +1863,6 @@ class DataGenerator(keras.utils.Sequence):
                         batch_mrcnn_mask[b] = mrcnn_mask
                 b += 1
 
-                # Batch full?
-                if b >= self.batch_size:
-                    inputs = [batch_images, batch_image_meta, batch_rpn_match, batch_rpn_bbox,
-                            batch_gt_class_ids, batch_gt_boxes, batch_gt_masks]
-                    outputs = []
-
-                    if self.random_rois:
-                        inputs.extend([batch_rpn_rois])
-                        if self.detection_targets:
-                            inputs.extend([batch_rois])
-                            # Keras requires that output and targets have the same number of dimensions
-                            batch_mrcnn_class_ids = np.expand_dims(
-                                batch_mrcnn_class_ids, -1)
-                            outputs.extend(
-                                [batch_mrcnn_class_ids, batch_mrcnn_bbox, batch_mrcnn_mask])
-
-                    return inputs, outputs
-
             except (GeneratorExit, KeyboardInterrupt):
                 raise
             except:
@@ -1890,6 +1872,24 @@ class DataGenerator(keras.utils.Sequence):
                 self.error_count += 1
                 if self.error_count > 5:
                     raise
+
+        # Batch full?
+        if b > 0:
+            inputs = [batch_images, batch_image_meta, batch_rpn_match, batch_rpn_bbox,
+                    batch_gt_class_ids, batch_gt_boxes, batch_gt_masks]
+            outputs = []
+
+            if self.random_rois:
+                inputs.extend([batch_rpn_rois])
+                if self.detection_targets:
+                    inputs.extend([batch_rois])
+                    # Keras requires that output and targets have the same number of dimensions
+                    batch_mrcnn_class_ids = np.expand_dims(
+                        batch_mrcnn_class_ids, -1)
+                    outputs.extend(
+                        [batch_mrcnn_class_ids, batch_mrcnn_bbox, batch_mrcnn_mask])
+
+            return inputs, outputs
     
     def on_epoch_end(self):
         if self.shuffle == True:
@@ -1964,10 +1964,6 @@ class InferenceDataGenerator(keras.utils.Sequence):
                 batch_anchors[b] = self.anchors
                 b += 1
 
-                # Batch full?
-                if b >= self.batch_size:
-                    return [batch_images, batch_image_meta, batch_anchors]
-
             except (GeneratorExit, KeyboardInterrupt):
                 raise
             except:
@@ -1977,6 +1973,11 @@ class InferenceDataGenerator(keras.utils.Sequence):
                 self.error_count += 1
                 if self.error_count > 5:
                     raise
+
+        # Batch full?
+        if b > 0:
+            return [batch_images, batch_image_meta, batch_anchors]
+
 
 ############################################################
 #  MaskRCNN Class
