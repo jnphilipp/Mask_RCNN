@@ -843,7 +843,7 @@ class DetectionLayer(KE.Layer):
         # normalized coordinates
         return tf.reshape(
             detections_batch,
-            [self.config.BATCH_SIZE, self.config.DETECTION_MAX_INSTANCES, 6])
+            [-1, self.config.DETECTION_MAX_INSTANCES, 6])
 
     def compute_output_shape(self, input_shape):
         return (None, self.config.DETECTION_MAX_INSTANCES, 6)
@@ -2616,14 +2616,18 @@ class MaskRCNN():
             log("image_metas", image_metas)
             log("anchors", anchors)
         # Run object detection
+        fill = self.config.BATCH_SIZE - len(images) % self.config.BATCH_SIZE
+        inputs = [molded_images, image_metas, anchors]
         outputs = self.keras_model.predict(
-            [molded_images, image_metas, anchors],
+            # fill-after with zeros in batch dimension
+            # (because utils.batch_slice cannot cope with variable batch size):
+            [np.pad(x, [(0, fill)] + [(0, 0)] * (x.ndim-1)) for x in inputs],
             # let Keras do the batch de/muxing:
             batch_size=self.config.BATCH_SIZE,
             callbacks=callbacks,
-            verbose=0)
+            verbose=1)
         # Process detections
-        return unmold_outputs(*outputs)
+        return unmold_outputs(*outputs)[:-fill]
 
     def detect_molded(self, molded_images, image_metas, verbose=0, callbacks=None):
         """Runs the detection pipeline, automatically splitting the data into batches,
@@ -2663,14 +2667,18 @@ class MaskRCNN():
             log("image_metas", image_metas)
             log("anchors", anchors)
         # Run object detection
+        fill = self.config.BATCH_SIZE - len(images) % self.config.BATCH_SIZE
+        inputs = [molded_images, image_metas, anchors]
         outputs = self.keras_model.predict(
-            [molded_images, image_metas, anchors],
+            # fill-after with zeros in batch dimension
+            # (because utils.batch_slice cannot cope with variable batch size):
+            [np.pad(x, [(0, fill)] + [(0, 0)] * (x.ndim-1)) for x in inputs],
             # let Keras do the batch de/muxing:
             batch_size=self.config.BATCH_SIZE,
             callbacks=callbacks,
             verbose=0)
         # Process detections
-        return unmold_outputs(*outputs)
+        return unmold_outputs(*outputs)[:-fill]
 
     def detect_generator(self, batches, callbacks=None, max_queue_size=10, workers=1, verbose=0):
         """Runs the detection pipeline, queueing input from CPU context parallel to prediction.
@@ -3116,7 +3124,7 @@ def batch_pack_graph(x, counts, num_rows):
 def norm_boxes_graph(boxes, shape):
     """Converts boxes from pixel coordinates to normalized coordinates.
     boxes: [..., (y1, x1, y2, x2)] in pixel coordinates
-    shape: [..., (height, width)] in pixels
+    shape: [(height, width)] in pixels
 
     Note: In pixel coordinates (y2, x2) is outside the box. But in normalized
     coordinates it's inside the box.
