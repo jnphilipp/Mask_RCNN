@@ -924,7 +924,7 @@ def build_rpn_model(anchor_stride, anchors_per_location, depth):
 ############################################################
 
 def fpn_classifier_graph(rois, feature_maps, image_meta,
-                         pool_size, num_classes, 
+                         pool_size, num_classes,
 			 images_per_gpu,
 			 train_bn=True,
                          fc_layers_size=1024):
@@ -953,7 +953,7 @@ def fpn_classifier_graph(rois, feature_maps, image_meta,
             rois,
             lambda x: trim_zeros_graph(x, name="trim_rois"),
             images_per_gpu)
-    
+
     # ROI Pooling
     # Shape: [batch, num_rois, POOL_SIZE, POOL_SIZE, channels]
     x = PyramidROIAlign([pool_size, pool_size],
@@ -995,13 +995,13 @@ def fpn_classifier_graph(rois, feature_maps, image_meta,
     mrcnn_probs = KL.Lambda(
         lambda x: tf.where(non_zeros, x, K.zeros_like(x)),
         name="mrcnn_class_trimed")(mrcnn_probs)
-    
+
     # non_zeros: [batch, num_rois, num_classes, 4]
     non_zeros = K.tile(K.expand_dims(non_zeros, -1), (1,1,1,4))
     mrcnn_bbox = KL.Lambda(
         lambda x: tf.where(non_zeros, x, K.zeros_like(x)),
         name="mrcnn_bbox_trimed")(mrcnn_bbox)
-    
+
     return mrcnn_class_logits, mrcnn_probs, mrcnn_bbox
 
 
@@ -1120,7 +1120,7 @@ def rpn_bbox_loss_graph(config, target_bbox, rpn_match, rpn_bbox):
                                    config.IMAGES_PER_GPU)
 
     loss = smooth_l1_loss(target_bbox, rpn_bbox)
-    
+
     loss = K.switch(tf.size(loss) > 0, K.mean(loss), tf.constant(0.0))
     return loss
 
@@ -1163,7 +1163,7 @@ def mrcnn_class_loss_graph(target_bbox, target_class_ids, pred_class_logits,
     # Computer loss mean. Use only predictions that contribute
     # to the loss to get a correct mean.
     denominator = tf.reduce_sum(non_zeros)
-    loss = tf.cond(tf.not_equal(denominator, 0), 
+    loss = tf.cond(tf.not_equal(denominator, 0),
         lambda: tf.reduce_sum(loss)/denominator, lambda: tf.constant(0, 'float32'))
     return loss
 
@@ -1770,7 +1770,7 @@ class DataGenerator(keras.utils.Sequence):
         self.augmentation = augmentation
         self.random_rois = random_rois
         self.batch_size = batch_size
-        self.detection_targets = detection_targets     
+        self.detection_targets = detection_targets
         self.no_augmentation_sources = no_augmentation_sources or []
         self.on_epoch_end()
 
@@ -1779,11 +1779,11 @@ class DataGenerator(keras.utils.Sequence):
 
     def __getitem__(self, idx):
         return self.data_generator( self.image_ids[idx*self.batch_size:(idx+1)*self.batch_size] )
-    
+
     def data_generator(self,image_ids):
         b=0
         while b < self.batch_size and b < image_ids.shape[0]:
-            try: 
+            try:
                 # Get GT bounding boxes and masks for image.
                 image_id = image_ids[b]
 
@@ -1829,6 +1829,7 @@ class DataGenerator(keras.utils.Sequence):
                     batch_gt_masks = np.zeros(
                         (self.batch_size, gt_masks.shape[0], gt_masks.shape[1],
                         self.config.MAX_GT_INSTANCES), dtype=gt_masks.dtype)
+                    batch_gt_mdl = np.zeros((self.batch_size, self.config.NB_MDL), dtype=np.int32)
                     if self.random_rois:
                         batch_rpn_rois = np.zeros(
                             (self.batch_size, rpn_rois.shape[0], 4), dtype=rpn_rois.dtype)
@@ -1892,9 +1893,10 @@ class DataGenerator(keras.utils.Sequence):
                         batch_mrcnn_class_ids, -1)
                     outputs.extend(
                         [batch_mrcnn_class_ids, batch_mrcnn_bbox, batch_mrcnn_mask])
+            outputs.append(batch_gt_mdl)
 
             return inputs, outputs
-    
+
     def on_epoch_end(self):
         if self.shuffle == True:
             np.random.shuffle(self.image_ids)
@@ -2134,6 +2136,8 @@ class MaskRCNN():
             name="ROI",
             config=config)([rpn_class, rpn_bbox, anchors])
 
+        mdl = KL.Dense(config.NB_MDL, activation="softmax")(P6)
+
         if mode == "training":
             # Class ID mask to mark class IDs supported by the dataset the image
             # came from.
@@ -2197,7 +2201,8 @@ class MaskRCNN():
             outputs = [rpn_class_logits, rpn_class, rpn_bbox,
                        mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask,
                        rpn_rois, output_rois,
-                       rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss]
+                       rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss,
+                       mdl]
             model = KM.Model(inputs, outputs, name='mask_rcnn')
         else:
             # Network Heads
@@ -2227,7 +2232,7 @@ class MaskRCNN():
                              [detections, mrcnn_class, mrcnn_bbox,
                               mrcnn_mask, rpn_rois, rpn_class, rpn_bbox,
                               # output image_metas to facilitate unmolding
-                              KL.Lambda(lambda x: x)(input_image_meta)],
+                              KL.Lambda(lambda x: x)(input_image_meta), mdl],
                              name='mask_rcnn')
 
         # Add multi-GPU support.
@@ -2355,6 +2360,7 @@ class MaskRCNN():
             for w in self.keras_model.trainable_weights
             if 'gamma' not in w.name and 'beta' not in w.name]
         self.keras_model.add_loss(tf.add_n(reg_losses))
+        self.keras_model.add_loss("categorical_crossentropy")
 
         # Compile
         self.keras_model.compile(
@@ -2371,6 +2377,7 @@ class MaskRCNN():
                 tf.reduce_mean(layer.output, keepdims=True)
                 * self.config.LOSS_WEIGHTS.get(name, 1.))
             self.keras_model.add_metric(loss, name)
+        self.keras_model.add_metric("categorical_accuracy")
 
     def set_trainable(self, layer_regex, keras_model=None, indent=0, verbose=1):
         """Sets model layers as trainable if their names match
@@ -2557,7 +2564,7 @@ class MaskRCNN():
         """
         # require training mode for loss layers
         assert self.mode == "training", "Create model in training mode."
-        
+
         log("Checkpoint Path: {}".format(self.checkpoint_path))
         self.compile(self.config.LEARNING_RATE, self.config.LEARNING_MOMENTUM)
         val_generator = DataGenerator(val_dataset, self.config, shuffle=True,
@@ -2635,7 +2642,7 @@ class MaskRCNN():
 
     def detect_molded(self, molded_images, image_metas, verbose=0, callbacks=None):
         """Runs the detection pipeline, automatically splitting the data into batches,
-        but expect inputs that are molded already. 
+        but expect inputs that are molded already.
         Used mostly for debugging and inspecting the model.
 
         molded_images: List of images loaded using load_image_gt()
