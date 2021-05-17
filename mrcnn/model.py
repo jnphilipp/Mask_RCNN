@@ -1333,9 +1333,14 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     # Active classes
     # Different datasets have different classes, so track the
     # classes supported in the dataset of this image.
+    source = dataset.image_info[image_id]["source"]
+    source_class_ids = dataset.source_class_ids[source]
     active_class_ids = np.zeros([config.NUM_CLASSES], dtype=np.int32)
-    source_class_ids = dataset.source_class_ids[dataset.image_info[image_id]["source"]]
     active_class_ids[source_class_ids] = 1
+    assert np.all(active_class_ids[class_ids]), \
+        "Image {} ('{}') has annotations for classes not known for source '{}': {}".format(
+            image_id, dataset.image_reference(image_id), source,
+            set(class_ids).difference(source_class_ids))
 
     # Resize masks to smaller size to reduce memory usage
     if use_mini_mask:
@@ -1746,7 +1751,7 @@ class DataGenerator(keras.utils.Sequence):
                    random_rois=0, batch_size=1, detection_targets=False,
                    no_augmentation_sources=None):
 
-        self.image_ids = np.copy(dataset.image_ids)
+        self.image_ids = np.copy(dataset.image_ids) # shuffled
         self.dataset = dataset
         self.config = config
         self.error_count = 0
@@ -1767,8 +1772,7 @@ class DataGenerator(keras.utils.Sequence):
         self.batch_size = batch_size
         self.detection_targets = detection_targets     
         self.no_augmentation_sources = no_augmentation_sources or []
-
-   
+        self.on_epoch_end()
 
     def __len__(self):
         return int(np.ceil(len(self.image_ids) / float(self.batch_size)))
@@ -1873,7 +1877,7 @@ class DataGenerator(keras.utils.Sequence):
                 if self.error_count > 5:
                     raise
 
-        # Batch full?
+        # Batch not empty?
         if b > 0:
             inputs = [batch_images, batch_image_meta, batch_rpn_match, batch_rpn_bbox,
                     batch_gt_class_ids, batch_gt_boxes, batch_gt_masks]
@@ -1974,7 +1978,7 @@ class InferenceDataGenerator(keras.utils.Sequence):
                 if self.error_count > 5:
                     raise
 
-        # Batch full?
+        # Batch not empty?
         if b > 0:
             return [batch_images, batch_image_meta, batch_anchors]
 
@@ -2583,11 +2587,11 @@ class MaskRCNN():
                           Boolean matrix [images, classes].
 
         Returns an in-order list of dicts, one dict per image. The dict contains:
-        image_id: Integer image identifier as provided by the generator's image_metas output.
-        rois: [N, (y1, x1, y2, x2)] detection bounding boxes
-        class_ids: [N] int class IDs
-        scores: [N] float probability scores for the class IDs
-        masks: [H, W, N] instance binary masks
+        - 'image_id': Integer image identifier as provided by the generator's image_metas output.
+        - 'rois': [N, (y1, x1, y2, x2)] detection bounding boxes
+        - 'class_ids': [N] int class IDs
+        - 'scores': [N] float probability scores for the class IDs
+        - 'masks': [H, W, N] instance binary masks
         """
         assert self.mode == "inference", "Create model in inference mode."
         if verbose:
@@ -2638,11 +2642,11 @@ class MaskRCNN():
         image_metas: image meta data, also returned by load_image_gt()
 
         Returns an in-order list of dicts, one dict per image. The dict contains:
-        image_id: Integer image identifier as provided by the generator's image_metas output.
-        rois: [N, (y1, x1, y2, x2)] detection bounding boxes
-        class_ids: [N] int class IDs
-        scores: [N] float probability scores for the class IDs
-        masks: [H, W, N] instance binary masks
+        - 'image_id': Integer image identifier as provided by the generator's image_metas output.
+        - 'rois': [N, (y1, x1, y2, x2)] detection bounding boxes
+        - 'class_ids': [N] int class IDs
+        - 'scores': [N] float probability scores for the class IDs
+        - 'masks': [H, W, N] instance binary masks
         """
         assert self.mode == "inference", "Create model in inference mode."
         if verbose:
@@ -2688,11 +2692,11 @@ class MaskRCNN():
         (See keras.Model.predict_generator() for other arguments.)
 
         Returns an in-order list of dicts, one dict per image. The dict contains:
-        image_id: Integer image identifier as provided by the generator's image_metas output.
-        rois: [N, (y1, x1, y2, x2)] detection bounding boxes
-        class_ids: [N] int class IDs
-        scores: [N] float probability scores for the class IDs
-        masks: [H, W, N] instance binary masks
+        - 'image_id': Integer image identifier as provided by the generator's image_metas output.
+        - 'rois': [N, (y1, x1, y2, x2)] detection bounding boxes
+        - 'class_ids': [N] int class IDs
+        - 'scores': [N] float probability scores for the class IDs
+        - 'masks': [H, W, N] instance binary masks
         """
         assert self.mode == "inference", "Create model in inference mode."
         assert KE.training_utils.is_sequence(batches), \
