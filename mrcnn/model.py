@@ -2616,7 +2616,7 @@ class MaskRCNN():
             log("image_metas", image_metas)
             log("anchors", anchors)
         # Run object detection
-        fill = self.config.BATCH_SIZE - len(images) % self.config.BATCH_SIZE
+        fill = len(images) - len(images) // self.config.BATCH_SIZE * self.config.BATCH_SIZE
         inputs = [molded_images, image_metas, anchors]
         outputs = self.keras_model.predict(
             # fill-after with zeros in batch dimension
@@ -2627,7 +2627,7 @@ class MaskRCNN():
             callbacks=callbacks,
             verbose=1)
         # Process detections
-        return unmold_outputs(*outputs)[:-fill]
+        return unmold_outputs(*outputs)[:len(outputs)-fill]
 
     def detect_molded(self, molded_images, image_metas, verbose=0, callbacks=None):
         """Runs the detection pipeline, automatically splitting the data into batches,
@@ -2667,7 +2667,7 @@ class MaskRCNN():
             log("image_metas", image_metas)
             log("anchors", anchors)
         # Run object detection
-        fill = self.config.BATCH_SIZE - len(images) % self.config.BATCH_SIZE
+        fill = len(images) - len(images) // self.config.BATCH_SIZE * self.config.BATCH_SIZE
         inputs = [molded_images, image_metas, anchors]
         outputs = self.keras_model.predict(
             # fill-after with zeros in batch dimension
@@ -2678,7 +2678,7 @@ class MaskRCNN():
             callbacks=callbacks,
             verbose=0)
         # Process detections
-        return unmold_outputs(*outputs)[:-fill]
+        return unmold_outputs(*outputs)[:len(outputs)-fill]
 
     def detect_generator(self, batches, callbacks=None, max_queue_size=10, workers=1, verbose=0):
         """Runs the detection pipeline, queueing input from CPU context parallel to prediction.
